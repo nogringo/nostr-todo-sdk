@@ -1,16 +1,19 @@
 name: nostr_todo_sdk
-description: A starting point for Dart libraries or applications.
+description: A Dart SDK for building todo applications with Nostr protocol.
 version: 1.0.0
-# repository: https://github.com/my_org/my_repo
+repository: https://github.com/nogringo/nostr-todo-sdk
+homepage: https://github.com/nogringo/nostr-todo-sdk
+
+topics:
+  - nostr
+  - todolist
 
 environment:
   sdk: ^3.8.1
 
-# Add regular dependencies here.
 dependencies:
   sembast: ^3.8.5+1
   ndk: ^0.5.0
-  # path: ^1.8.0
 
 dev_dependencies:
   lints: ^5.0.0

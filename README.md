@@ -1,1 +1,51 @@
 A Dart SDK for building todo applications with Nostr protocol.
+
+## Example
+
+```dart
+void main() async {
+  // Initialize in-memory database for example
+  final db = await databaseFactoryMemory.openDatabase('example.db');
+
+  // Initialize NDK
+  final ndk = Ndk(
+    NdkConfig(cache: MemCacheManager(), eventVerifier: Bip340EventVerifier()),
+  );
+
+  // Login with a private key (example - use secure storage in production)
+  // This is just for demonstration
+  ndk.accounts.loginPrivateKey(
+    pubkey: "b8b7d8681855c33abac83c7f022058d74f2d66fdb5eff1e137d15efecc29a3e6",
+    privkey: "1206809c7dce1ddf4915eb9a7388a001ca7f66395d4bb2c2a50335892fc2c2ce",
+  );
+
+  // Create TodoService instance - automatically starts listening to todo events
+  final todoService = TodoService(ndk: ndk, db: db);
+
+  // Example: Create a todo
+  final todo = await todoService.createTodo(
+    description: 'Buy groceries',
+    encrypted: false,
+  );
+  print('Created todo: ${todo.description}');
+
+  // Example: Switch to a different account
+  ndk.accounts.logout();
+  ndk.accounts.loginPrivateKey(
+    pubkey: "different_pubkey_here",
+    privkey: "different_privkey_here",
+  );
+  
+  // IMPORTANT: Notify TodoService about auth state change
+  todoService.onAuthStateChanged();
+  
+  // Now the service is listening to the new user's events
+  
+  // When done, clean up
+  todoService.stopListening();
+}
+```
+
+## My Nostr for contact and donation
+
+https://njump.me/npub1kg4sdvz3l4fr99n2jdz2vdxe2mpacva87hkdetv76ywacsfq5leqquw5te
