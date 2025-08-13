@@ -13,7 +13,7 @@ class TodoService {
   final sembast.StoreRef<String, Map<String, dynamic>> todoEventsStore;
   final sembast.StoreRef<String, bool> deletedEventsStore;
   NdkResponse? _subscription;
-  
+
   // Stream controller for todo changes (emits void events)
   final _controller = StreamController<void>.broadcast();
   Stream<void> get stream => _controller.stream;
@@ -168,44 +168,49 @@ class TodoService {
 
     // Broadcast to network
     ndk.broadcast.broadcast(nostrEvent: event);
-    
+
     _controller.add(null); // Emit change
 
     return Todo(
       eventId: event.id,
       description: description,
       createdAt: DateTime.fromMillisecondsSinceEpoch(event.createdAt * 1000),
-      isCompleted: false,
+      status: TodoStatus.pending,
     );
   }
 
-  Future<void> completeTodo({required String id}) async {
+  Future<void> updateTodoStatus({
+    required String id,
+    required TodoStatus status,
+  }) async {
     final currentPubkey = pubkey;
     if (currentPubkey == null) return;
 
-    // Check if already marked as completed
-    final finder = sembast.Finder(
-      filter: sembast.Filter.and([
-        sembast.Filter.equals('nostrEvent.kind', kindTodoStatus),
-        sembast.Filter.equals('nostrEvent.pubkey', currentPubkey),
-      ]),
-    );
-    final statusEvents = await todoEventsStore.find(db, finder: finder);
+    // Don't create status event for pending status
+    if (status == TodoStatus.pending) {
+      await removeTodoStatus(id: id);
+      return;
+    }
 
-    for (var record in statusEvents) {
-      final nostrEvent = record.value['nostrEvent'];
-      final tags = nostrEvent['tags'] as List;
-      for (var tag in tags) {
-        if (tag is List && tag.length > 1 && tag[0] == 'e' && tag[1] == id) {
-          return; // Already marked as completed
-        }
-      }
+    String statusContent;
+    switch (status) {
+      case TodoStatus.doing:
+        statusContent = 'DOING';
+        break;
+      case TodoStatus.done:
+        statusContent = 'DONE';
+        break;
+      case TodoStatus.blocked:
+        statusContent = 'BLOCKED';
+        break;
+      default:
+        return; // Don't create status for pending
     }
 
     final event = Nip01Event(
       pubKey: currentPubkey,
       kind: kindTodoStatus,
-      content: 'DONE',
+      content: statusContent,
       tags: [
         ['e', id],
       ],
@@ -219,8 +224,20 @@ class TodoService {
 
     // Broadcast to network
     ndk.broadcast.broadcast(nostrEvent: event);
-    
+
     _controller.add(null); // Emit change
+  }
+
+  Future<void> completeTodo({required String id}) async {
+    await updateTodoStatus(id: id, status: TodoStatus.done);
+  }
+
+  Future<void> startTodo({required String id}) async {
+    await updateTodoStatus(id: id, status: TodoStatus.doing);
+  }
+
+  Future<void> blockTodo({required String id}) async {
+    await updateTodoStatus(id: id, status: TodoStatus.blocked);
   }
 
   /// Remove the status of a todo (returns it to pending state)
@@ -263,7 +280,7 @@ class TodoService {
         ndk.broadcast.broadcastDeletion(eventId: statusEventId);
       }
     }
-    
+
     _controller.add(null); // Emit change
   }
 
@@ -320,7 +337,7 @@ class TodoService {
 
       ndk.broadcast.broadcast(nostrEvent: deleteEvent);
     }
-    
+
     _controller.add(null); // Emit change
   }
 
@@ -336,19 +353,38 @@ class TodoService {
     );
     final records = await todoEventsStore.find(db, finder: finder);
 
-    // Build completion status map
-    Map<String, bool> completionStatus = {};
+    // Build status map (keep only the latest status for each todo)
+    Map<String, TodoStatus> statusMap = {};
+    Map<String, int> statusTimestamps = {};
+
     for (var record in records) {
       final data = record.value;
       final nostrEvent = data['nostrEvent'];
 
-      if (nostrEvent['kind'] == kindTodoStatus &&
-          nostrEvent['content'] == 'DONE') {
+      if (nostrEvent['kind'] == kindTodoStatus) {
         final tags = nostrEvent['tags'] as List;
+        String? todoId;
         for (var tag in tags) {
           if (tag is List && tag.length > 1 && tag[0] == 'e') {
-            completionStatus[tag[1]] = true;
+            todoId = tag[1];
             break;
+          }
+        }
+
+        if (todoId != null) {
+          final timestamp = nostrEvent['created_at'] as int;
+          // Only update if this is newer than the existing status
+          if (!statusTimestamps.containsKey(todoId) ||
+              statusTimestamps[todoId]! < timestamp) {
+            statusTimestamps[todoId] = timestamp;
+
+            if (nostrEvent['content'] == 'DOING') {
+              statusMap[todoId] = TodoStatus.doing;
+            } else if (nostrEvent['content'] == 'DONE') {
+              statusMap[todoId] = TodoStatus.done;
+            } else if (nostrEvent['content'] == 'BLOCKED') {
+              statusMap[todoId] = TodoStatus.blocked;
+            }
           }
         }
       }
@@ -366,7 +402,7 @@ class TodoService {
           Todo(
             eventId: nostrEvent['id'],
             description: decryptedContent,
-            isCompleted: completionStatus[nostrEvent['id']] ?? false,
+            status: statusMap[nostrEvent['id']] ?? TodoStatus.pending,
             createdAt: DateTime.fromMillisecondsSinceEpoch(
               nostrEvent['created_at'] * 1000,
             ),
@@ -381,9 +417,29 @@ class TodoService {
     return result;
   }
 
+  /// Get todos by status
+  Future<List<Todo>> getTodosByStatus(TodoStatus status) async {
+    final allTodos = await getTodos();
+    return allTodos.where((todo) => todo.status == status).toList();
+  }
+
   /// Get only completed todos
   Future<List<Todo>> getCompletedTodos() async {
-    final allTodos = await getTodos();
-    return allTodos.where((todo) => todo.isCompleted).toList();
+    return getTodosByStatus(TodoStatus.done);
+  }
+
+  /// Get pending todos
+  Future<List<Todo>> getPendingTodos() async {
+    return getTodosByStatus(TodoStatus.pending);
+  }
+
+  /// Get in-progress todos
+  Future<List<Todo>> getInProgressTodos() async {
+    return getTodosByStatus(TodoStatus.doing);
+  }
+
+  /// Get blocked todos
+  Future<List<Todo>> getBlockedTodos() async {
+    return getTodosByStatus(TodoStatus.blocked);
   }
 }

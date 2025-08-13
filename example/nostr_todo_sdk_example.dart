@@ -26,7 +26,43 @@ void main() async {
     description: 'Buy groceries',
     encrypted: false,
   );
-  print('Created todo: ${todo.description}');
+  print('Created todo: ${todo.description} (Status: ${todo.status})');
+
+  // Example: Start working on a todo
+  await todoService.startTodo(id: todo.eventId);
+  print('Started todo: ${todo.eventId}');
+
+  // Example: Complete a todo
+  await todoService.completeTodo(id: todo.eventId);
+  print('Completed todo: ${todo.eventId}');
+
+  // Example: Update todo status directly
+  await todoService.updateTodoStatus(
+    id: todo.eventId,
+    status: TodoStatus.doing,
+  );
+  print('Updated todo status to: doing');
+
+  // Example: Block a todo
+  await todoService.blockTodo(id: todo.eventId);
+  print('Blocked todo: ${todo.eventId}');
+
+  // Example: Get todos by status
+  final pendingTodos = await todoService.getPendingTodos();
+  print('Pending todos: ${pendingTodos.length}');
+
+  final inProgressTodos = await todoService.getInProgressTodos();
+  print('In-progress todos: ${inProgressTodos.length}');
+
+  final completedTodos = await todoService.getCompletedTodos();
+  print('Completed todos: ${completedTodos.length}');
+
+  final blockedTodos = await todoService.getBlockedTodos();
+  print('Blocked todos: ${blockedTodos.length}');
+
+  // Example: Remove todo status (return to pending)
+  await todoService.removeTodoStatus(id: todo.eventId);
+  print('Removed todo status, back to pending');
 
   // Example: Switch to a different account
   ndk.accounts.logout();
@@ -34,12 +70,12 @@ void main() async {
     pubkey: "different_pubkey_here",
     privkey: "different_privkey_here",
   );
-  
+
   // IMPORTANT: Notify TodoService about auth state change
   todoService.onAuthStateChanged();
-  
+
   // Now the service is listening to the new user's events
-  
+
   // When done, clean up
   todoService.stopListening();
 }

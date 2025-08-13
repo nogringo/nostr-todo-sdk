@@ -47,6 +47,7 @@ Todo status updates are represented by events with kind `714`. The status is sto
 Supported statuses:
 - `DOING` - Todo is in progress
 - `DONE` - Todo is completed
+- `BLOCKED` - Todo is blocked/waiting on something
 
 By default, todos have no status marker and are considered "pending" or "to do". Status events should only be created when the status changes.
 
@@ -125,6 +126,17 @@ Clients SHOULD:
   "kind": 714,
   "tags": [["e", "<todo-event-id>"]],
   "content": "DONE",
+  ...
+}
+```
+
+### Marking a Todo as Blocked
+
+```json
+{
+  "kind": 714,
+  "tags": [["e", "<todo-event-id>"]],
+  "content": "BLOCKED",
   ...
 }
 ```
