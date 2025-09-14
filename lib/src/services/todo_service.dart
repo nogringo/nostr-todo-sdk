@@ -76,7 +76,6 @@ class TodoService {
   }
 
   Future<void> processIncomingEvent(Nip01Event event) async {
-    print("event");
     if (event.kind == kindDeletion) {
       // Handle deletion
       List<String> targetEventIds = event.getTags("e");
