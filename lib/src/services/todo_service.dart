@@ -31,12 +31,10 @@ class TodoService {
     if (currentPubkey == null) return;
 
     _subscription = ndk.requests.subscription(
-      filters: [
-        Filter(
-          kinds: [kindDeletion, kindTodo, kindTodoStatus],
-          authors: [currentPubkey],
-        ),
-      ],
+      filter: Filter(
+        kinds: [kindDeletion, kindTodo, kindTodoStatus],
+        authors: [currentPubkey],
+      ),
       cacheRead: true,
       cacheWrite: true,
     );
@@ -114,13 +112,13 @@ class TodoService {
         }
 
         await todoEventsStore.record(event.id).put(db, {
-          'nostrEvent': event.toJson(),
+          'nostrEvent': Nip01EventModel.fromEntity(event).toJson(),
           'decryptedContent': decryptedContent,
         });
         _controller.add(null); // Emit change
       } else if (event.kind == kindTodoStatus) {
         await todoEventsStore.record(event.id).put(db, {
-          'nostrEvent': event.toJson(),
+          'nostrEvent': Nip01EventModel.fromEntity(event).toJson(),
           'decryptedContent': null,
         });
         _controller.add(null); // Emit change
@@ -161,7 +159,7 @@ class TodoService {
 
     // Store locally first (offline-first)
     await todoEventsStore.record(event.id).put(db, {
-      'nostrEvent': event.toJson(),
+      'nostrEvent': Nip01EventModel.fromEntity(event).toJson(),
       'decryptedContent': description,
     });
 
@@ -217,7 +215,7 @@ class TodoService {
 
     // Store locally first
     await todoEventsStore.record(event.id).put(db, {
-      'nostrEvent': event.toJson(),
+      'nostrEvent': Nip01EventModel.fromEntity(event).toJson(),
       'decryptedContent': null,
     });
 

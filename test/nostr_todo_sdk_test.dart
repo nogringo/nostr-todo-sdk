@@ -155,6 +155,7 @@ void main() {
     expect(completedTodos.first.eventId, equals(todo3.eventId));
 
     // Test: Update status from DOING to DONE
+    await Future<void>.delayed(const Duration(seconds: 1));
     await todoService.updateTodoStatus(
       id: todo2.eventId,
       status: TodoStatus.done,
