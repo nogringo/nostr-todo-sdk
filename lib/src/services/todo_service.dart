@@ -1,18 +1,23 @@
 import 'dart:async';
+import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
 import 'package:ndk/ndk.dart';
 import 'package:sembast/sembast.dart' as sembast;
 import '../models/todo.dart';
+import '../nostr_todo_constants.dart';
 
 class TodoService {
-  static const int kindTodo = 713;
-  static const int kindTodoStatus = 714;
-  static const int kindDeletion = 5;
+  static const int kindTodo = NostrTodoKinds.todo;
+  static const int kindTodoStatus = NostrTodoKinds.todoStatus;
+  static const int kindDeletion = NostrTodoKinds.deletion;
 
   final Ndk ndk;
   final sembast.Database db;
+  final OfflineBroadcast broadcastQueue;
+  final List<String> fallbackBroadcastRelays;
   final sembast.StoreRef<String, Map<String, dynamic>> todoEventsStore;
   final sembast.StoreRef<String, bool> deletedEventsStore;
-  NdkResponse? _subscription;
+  NdkResponse? _todoSubscription;
+  NdkResponse? _deletionSubscription;
 
   // Stream controller for todo changes (emits void events)
   final _controller = StreamController<void>.broadcast();
@@ -20,34 +25,85 @@ class TodoService {
 
   String? get pubkey => ndk.accounts.getPublicKey();
 
-  TodoService({required this.ndk, required this.db})
-    : todoEventsStore = sembast.stringMapStoreFactory.store('todo_events'),
-      deletedEventsStore = sembast.StoreRef<String, bool>.main() {
+  TodoService({
+    required this.ndk,
+    required this.db,
+    required this.broadcastQueue,
+    List<String>? fallbackBroadcastRelays,
+  }) : fallbackBroadcastRelays =
+           fallbackBroadcastRelays ??
+           (ndk.config.bootstrapRelays.isNotEmpty
+               ? ndk.config.bootstrapRelays
+               : NostrTodoDefaultRelays.fallbackBroadcastRelays),
+       todoEventsStore = sembast.stringMapStoreFactory.store('todo_events'),
+       deletedEventsStore = sembast.StoreRef<String, bool>.main() {
     _startListening();
+  }
+
+  Future<void> _broadcastEvent(Nip01Event event) async {
+    final relays = await _resolveBroadcastRelays(event.pubKey);
+    if (relays.isEmpty) {
+      throw StateError(
+        'No NIP-65 write relays or fallback broadcast relays available',
+      );
+    }
+
+    await broadcastQueue.broadcast(event, relays: relays);
+  }
+
+  Future<List<String>> _resolveBroadcastRelays(String pubkey) async {
+    final userRelayList = await ndk.userRelayLists.getSingleUserRelayList(
+      pubkey,
+    );
+    final writeRelays = userRelayList?.writeUrls.toSet().toList() ?? [];
+    if (writeRelays.isNotEmpty) {
+      return writeRelays;
+    }
+
+    return fallbackBroadcastRelays;
   }
 
   void _startListening() {
     final currentPubkey = pubkey;
     if (currentPubkey == null) return;
 
-    _subscription = ndk.requests.subscription(
+    _todoSubscription = ndk.requests.subscription(
       filter: Filter(
-        kinds: [kindDeletion, kindTodo, kindTodoStatus],
+        kinds: [kindTodo, kindTodoStatus],
         authors: [currentPubkey],
       ),
       cacheRead: true,
       cacheWrite: true,
     );
 
-    _subscription!.stream.listen((event) async {
+    _deletionSubscription = ndk.requests.subscription(
+      filter: Filter(
+        kinds: [kindDeletion],
+        authors: [currentPubkey],
+        tags: {
+          '#k': [kindTodo.toString(), kindTodoStatus.toString()],
+        },
+      ),
+      cacheRead: true,
+      cacheWrite: true,
+    );
+
+    _todoSubscription!.stream.listen((event) async {
+      await processIncomingEvent(event);
+    });
+    _deletionSubscription!.stream.listen((event) async {
       await processIncomingEvent(event);
     });
   }
 
   void stopListening() {
-    if (_subscription != null) {
-      ndk.requests.closeSubscription(_subscription!.requestId);
-      _subscription = null;
+    if (_todoSubscription != null) {
+      ndk.requests.closeSubscription(_todoSubscription!.requestId);
+      _todoSubscription = null;
+    }
+    if (_deletionSubscription != null) {
+      ndk.requests.closeSubscription(_deletionSubscription!.requestId);
+      _deletionSubscription = null;
     }
   }
 
@@ -66,11 +122,9 @@ class TodoService {
 
   /// Dispose of the TodoService and clean up resources
   /// Call this when the service is no longer needed
-  void dispose() {
+  Future<void> dispose() async {
     stopListening();
-    _controller.close();
-    // Note: We don't close the database here as it might be shared with other services
-    // The caller is responsible for closing the database when appropriate
+    await _controller.close();
   }
 
   Future<void> processIncomingEvent(Nip01Event event) async {
@@ -156,22 +210,25 @@ class TodoService {
             ]
           : [],
     );
+    final signedEvent = await ndk.accounts.sign(event);
 
     // Store locally first (offline-first)
-    await todoEventsStore.record(event.id).put(db, {
-      'nostrEvent': Nip01EventModel.fromEntity(event).toJson(),
+    await todoEventsStore.record(signedEvent.id).put(db, {
+      'nostrEvent': Nip01EventModel.fromEntity(signedEvent).toJson(),
       'decryptedContent': description,
     });
 
-    // Broadcast to network
-    ndk.broadcast.broadcast(nostrEvent: event);
+    // Queue for offline-first broadcast
+    await _broadcastEvent(signedEvent);
 
     _controller.add(null); // Emit change
 
     return Todo(
-      eventId: event.id,
+      eventId: signedEvent.id,
       description: description,
-      createdAt: DateTime.fromMillisecondsSinceEpoch(event.createdAt * 1000),
+      createdAt: DateTime.fromMillisecondsSinceEpoch(
+        signedEvent.createdAt * 1000,
+      ),
       status: TodoStatus.pending,
     );
   }
@@ -212,15 +269,16 @@ class TodoService {
         ['e', id],
       ],
     );
+    final signedEvent = await ndk.accounts.sign(event);
 
     // Store locally first
-    await todoEventsStore.record(event.id).put(db, {
-      'nostrEvent': Nip01EventModel.fromEntity(event).toJson(),
+    await todoEventsStore.record(signedEvent.id).put(db, {
+      'nostrEvent': Nip01EventModel.fromEntity(signedEvent).toJson(),
       'decryptedContent': null,
     });
 
-    // Broadcast to network
-    ndk.broadcast.broadcast(nostrEvent: event);
+    // Queue for offline-first broadcast
+    await _broadcastEvent(signedEvent);
 
     _controller.add(null); // Emit change
   }
@@ -268,13 +326,25 @@ class TodoService {
 
       if (isForThisTodo) {
         final statusEventId = nostrEvent['id'] as String;
+        final statusEventKind = nostrEvent['kind'] as int;
 
-        // Mark as deleted locally
+        final deleteEvent = Nip01Event(
+          pubKey: currentPubkey,
+          kind: kindDeletion,
+          content: 'delete',
+          tags: [
+            ['e', statusEventId],
+            ['k', statusEventKind.toString()],
+          ],
+        );
+        final signedDeleteEvent = await ndk.accounts.sign(deleteEvent);
+
+        // Mark as deleted locally only after the deletion event is signed
         await deletedEventsStore.record(statusEventId).put(db, true);
         await todoEventsStore.record(statusEventId).delete(db);
 
-        // Broadcast deletion to network
-        ndk.broadcast.broadcastDeletion(eventId: statusEventId);
+        // Queue deletion for offline-first broadcast
+        await _broadcastEvent(signedDeleteEvent);
       }
     }
 
@@ -292,7 +362,9 @@ class TodoService {
 
     if (ids.isEmpty) return;
 
-    List<String> eventIdsToDelete = [...ids]; // Start with the todo IDs
+    Map<String, int> eventIdsToDelete = {
+      for (final id in ids) id: kindTodo,
+    }; // Start with the todo IDs
 
     // Find all status events for this user
     final finder = sembast.Finder(
@@ -312,15 +384,10 @@ class TodoService {
             tag.length > 1 &&
             tag[0] == 'e' &&
             ids.contains(tag[1])) {
-          eventIdsToDelete.add(nostrEvent['id']);
+          eventIdsToDelete[nostrEvent['id'] as String] =
+              nostrEvent['kind'] as int;
         }
       }
-    }
-
-    // Store deletions locally first
-    for (var eventId in eventIdsToDelete) {
-      await deletedEventsStore.record(eventId).put(db, true);
-      await todoEventsStore.record(eventId).delete(db);
     }
 
     // Create a single deletion event with all IDs (more efficient than multiple broadcasts)
@@ -329,10 +396,22 @@ class TodoService {
         pubKey: currentPubkey,
         kind: kindDeletion,
         content: '',
-        tags: eventIdsToDelete.map((id) => ['e', id]).toList(),
+        tags: [
+          ...eventIdsToDelete.keys.map((id) => ['e', id]),
+          ...eventIdsToDelete.values.toSet().map(
+            (kind) => ['k', kind.toString()],
+          ),
+        ],
       );
+      final signedDeleteEvent = await ndk.accounts.sign(deleteEvent);
 
-      ndk.broadcast.broadcast(nostrEvent: deleteEvent);
+      // Store deletions locally only after the deletion event is signed
+      for (var eventId in eventIdsToDelete.keys) {
+        await deletedEventsStore.record(eventId).put(db, true);
+        await todoEventsStore.record(eventId).delete(db);
+      }
+
+      await _broadcastEvent(signedDeleteEvent);
     }
 
     _controller.add(null); // Emit change

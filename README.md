@@ -12,6 +12,9 @@ void main() async {
     NdkConfig(cache: MemCacheManager(), eventVerifier: Bip340EventVerifier()),
   );
 
+  final broadcastQueue = OfflineBroadcast.withNdk(ndk, db: db);
+  broadcastQueue.start();
+
   // Login with a private key (example - use secure storage in production)
   // This is just for demonstration
   ndk.accounts.loginPrivateKey(
@@ -20,7 +23,11 @@ void main() async {
   );
 
   // Create TodoService instance - automatically starts listening to todo events
-  final todoService = TodoService(ndk: ndk, db: db);
+  final todoService = TodoService(
+    ndk: ndk,
+    db: db,
+    broadcastQueue: broadcastQueue,
+  );
 
   // Example: Create a todo
   final todo = await todoService.createTodo(
@@ -42,7 +49,8 @@ void main() async {
   // Now the service is listening to the new user's events
   
   // When done, clean up
-  todoService.stopListening();
+  await todoService.dispose();
+  await broadcastQueue.dispose();
 }
 ```
 

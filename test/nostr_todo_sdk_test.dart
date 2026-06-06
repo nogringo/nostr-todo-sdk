@@ -1,21 +1,29 @@
 import 'package:nostr_todo_sdk/nostr_todo_sdk.dart';
+import 'package:broadcast_queue_shim_for_ndk/broadcast_queue_shim_for_ndk.dart';
 import 'package:ndk/ndk.dart';
 import 'package:sembast/sembast_memory.dart';
 import 'package:sembast/sembast.dart' as sembast;
 import 'package:test/test.dart';
 
+import 'mocks/mock_relay.dart';
+
 void main() {
   test('should create and complete a todo', () async {
     // Setup
+    final relay = MockRelay(name: 'todo relay');
+    await relay.startServer();
     final db = await databaseFactoryMemory.openDatabase('test.db');
 
     final ndk = Ndk(
       NdkConfig(
         cache: MemCacheManager(),
         eventVerifier: Bip340EventVerifier(),
-        bootstrapRelays: ["ws://localhost:7777"],
+        bootstrapRelays: [relay.url],
       ),
     );
+    await ndk.relays.seedRelaysConnected;
+    final broadcastQueue = OfflineBroadcast.withNdk(ndk, db: db);
+    broadcastQueue.start();
 
     // Login with real Nostr keypair
     ndk.accounts.loginPrivateKey(
@@ -25,7 +33,11 @@ void main() {
           '1206809c7dce1ddf4915eb9a7388a001ca7f66395d4bb2c2a50335892fc2c2ce',
     );
 
-    final todoService = TodoService(ndk: ndk, db: db);
+    final todoService = TodoService(
+      ndk: ndk,
+      db: db,
+      broadcastQueue: broadcastQueue,
+    );
 
     // Create a todo
     final todo = await todoService.createTodo(
@@ -82,21 +94,29 @@ void main() {
     expect(completedTodo.status, equals(TodoStatus.done));
 
     // Cleanup
-    todoService.dispose();
+    await todoService.dispose();
+    await broadcastQueue.dispose();
+    await ndk.destroy();
+    await relay.stopServer();
     await db.close();
   });
 
   test('should handle multiple todo statuses', () async {
     // Setup
+    final relay = MockRelay(name: 'todo status relay');
+    await relay.startServer();
     final db = await databaseFactoryMemory.openDatabase('test_status.db');
 
     final ndk = Ndk(
       NdkConfig(
         cache: MemCacheManager(),
         eventVerifier: Bip340EventVerifier(),
-        bootstrapRelays: ["ws://localhost:7777"],
+        bootstrapRelays: [relay.url],
       ),
     );
+    await ndk.relays.seedRelaysConnected;
+    final broadcastQueue = OfflineBroadcast.withNdk(ndk, db: db);
+    broadcastQueue.start();
 
     ndk.accounts.loginPrivateKey(
       pubkey:
@@ -105,7 +125,11 @@ void main() {
           '1206809c7dce1ddf4915eb9a7388a001ca7f66395d4bb2c2a50335892fc2c2ce',
     );
 
-    final todoService = TodoService(ndk: ndk, db: db);
+    final todoService = TodoService(
+      ndk: ndk,
+      db: db,
+      broadcastQueue: broadcastQueue,
+    );
 
     // Create multiple todos
     final todo1 = await todoService.createTodo(
@@ -169,13 +193,29 @@ void main() {
 
     // Test: Remove status (return to pending)
     await todoService.removeTodoStatus(id: todo3.eventId);
+    final queuedDeletionEvents = (await broadcastQueue.listAll())
+        .where((entry) => entry.event.kind == TodoService.kindDeletion)
+        .toList();
+    expect(queuedDeletionEvents, isNotEmpty);
+    expect(
+      queuedDeletionEvents.last.event.tags.any(
+        (tag) =>
+            tag.length == 2 &&
+            tag[0] == 'k' &&
+            tag[1] == TodoService.kindTodoStatus.toString(),
+      ),
+      isTrue,
+    );
 
     final resetTodos = await todoService.getTodos();
     final resetTodo3 = resetTodos.firstWhere((t) => t.eventId == todo3.eventId);
     expect(resetTodo3.status, equals(TodoStatus.pending));
 
     // Cleanup
-    todoService.dispose();
+    await todoService.dispose();
+    await broadcastQueue.dispose();
+    await ndk.destroy();
+    await relay.stopServer();
     await db.close();
   });
 }
